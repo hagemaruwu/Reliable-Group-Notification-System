@@ -10,9 +10,9 @@ A UDP-based group notification system that reliably delivers alerts to multiple 
 - **Automated Performance Testing**: Includes a robust test suite simulating 0% to 30% packet loss environments, tracking real-time delivery rate vs latency tradeoffs, and exporting dynamic visual Matplotlib charts.
 
 ## 👥 Team Members
-- Aditya Basavaraj Jambagi (PES2UG24CS030) - Server Side & ACK Logic
-- Aditya Raj (PES2UG24CS033) - Client Side & Packet Handling
-- Aks Raj Singh (PES2UG24CS044) - Testing & Performance Stats
+- Aditya Basavaraj Jambagi - Server Side & ACK Logic
+- Aditya Raj - Client Side & Packet Handling
+- Aks Raj Singh - Testing & Performance Stats
 
 ## 🛠️ Requirements
 - Python 3.x
