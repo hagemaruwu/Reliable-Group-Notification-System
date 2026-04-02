@@ -144,6 +144,13 @@ class NotificationClient:
             self.running = False
 
 
+import sys
+
 if __name__ == "__main__":
-    client = NotificationClient()
+    # Allow passing the server IP via command line arguments!
+    # Usage: python3 client.py <server_ip>
+    # If no IP is provided, it defaults to 127.0.0.1
+    host = sys.argv[1] if len(sys.argv) > 1 else SERVER_IP
+    
+    client = NotificationClient(server_host=host)
     client.start()
