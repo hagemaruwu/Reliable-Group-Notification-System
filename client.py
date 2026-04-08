@@ -2,48 +2,35 @@
 client.py
 Author: Aditya Raj (PES2UG24CS033)
 Description:
-    The subscriber client for the Reliable Group Notification System.
+    Yeh Reliable Group Notification System ka subscriber client hai.
 
     ── Hybrid Architecture (SSL/TCP + UDP) ──────────────────────────────────────
-    This client uses TWO channels:
+    Yeh client DO(2) channels use karta hai:
 
-    1. SSL/TCP Authentication Channel  (connects to server port 5001)
-       ───────────────────────────────────────────────────────────────
-       - Used ONLY once at startup to send the SUBSCRIBE packet.
-       - The SUBSCRIBE payload contains the client's UDP port number.
-       - The TLS handshake encrypts this registration (SSL/TLS requirement).
-       - Connection is closed immediately after SUBSCRIBE — it's a one-shot auth.
+    1. SSL/TCP Authentication Channel (server port 5001 se connect hota hai)
+       ───────────────────────────────────────────────────────────────────
+       - Sirf ek baar shuru mein use hota hai SUBSCRIBE packet bhejne ke liye.
+       - SUBSCRIBE payload ke andar client ka apna UDP port number hota hai.
+       - Is connection mein TLS encryption hota hai (jo project ki requirement hai).
+       - SUBSCRIBE karne ke turant baad yeh connection close ho jata hai (one-shot auth).
 
-    2. UDP Data Channel  (client binds a local UDP port, server uses port 5000)
-       ─────────────────────────────────────────────────────────────────────────
-       - All NOTIFY packets from the server are received here.
-       - All ACK confirmations are sent here (confirming receipt of notifications).
-       - All HEARTBEAT pings are sent here (keep-alive, every 2 seconds).
-       - UNSUBSCRIBE is sent here on graceful exit.
-       - This keeps the project "UDP-based" as per the project specification.
-
-    ── Application-Layer Features ───────────────────────────────────────────────
-    1. Listener thread   — waits for NOTIFY on UDP socket, sends ACK immediately.
-    2. Heartbeat thread  — pings server with HEARTBEAT over UDP every 2 seconds.
-    3. Duplicate detection — seq number set prevents double-processing.
-    4. Latency tracking  — parses embedded timestamp from payload for metrics.
-
-    ── Edge Cases Handled ────────────────────────────────────────────────────────
-    - Server not running          → ConnectionRefusedError with helpful message
-    - SSL handshake failure       → SSLError caught with clear diagnostic
-    - Invalid port in SUBSCRIBE   → Validated before connecting
-    - UDP receive error           → logged, listener continues
-    - UDP send failure            → logged without crashing
+    2. UDP Data Channel (client ek local UDP port bind karta hai, server 5000 use karta hai)
+       ───────────────────────────────────────────────────────────────────────────
+       - Server se aane wale saare NOTIFY packets yahan receive hote hain.
+       - Hum jo ACK (acknowledgement) bhejte hain wo yahan se jata hai.
+       - HEARTBEAT pings (har 2 second mein) yahan se bheji jati hain.
+       - Project purely "UDP-based" rahe, isliye baki saara data UDP par hai.
 """
 
-import socket     # Python's built-in networking library
-import ssl        # SSL/TLS for the authentication channel (SUBSCRIBE)
-import threading  # Runs the listener and heartbeat loops in background threads
-import time       # For latency calculation and heartbeat sleep timing
-import logging    # Structured, timestamped terminal log output
-import random     # For simulating packet loss during testing
+import socket     # Python ka built-in networking library
+import ssl        # SSL/TLS authentication ke liye (SUBSCRIBE packet encrypt karne)
+import threading  # Loops ko background mein ek sath (parallel) chalane ke liye
+import time       # Latency calculate karne aur heartbeat mein delay dene ke liye
+import logging    # Terminal par clear messages print karne ke liye
+import random     # Testing ke time packet drop (loss) simulate karne ke liye
+import sys        # Command line arguments read karne ke liye
 
-# Import our custom binary protocol, message types, and SSL/TCP framing helper
+# Hamara custom binary protocol format import kar rahe hain
 from protocol import (
     TYPE_SUBSCRIBE, TYPE_NOTIFY, TYPE_ACK,
     TYPE_UNSUBSCRIBE, TYPE_HEARTBEAT,
@@ -51,11 +38,11 @@ from protocol import (
 )
 
 # ─── Default Server Addresses ─────────────────────────────────────────────────
-SERVER_HOST     = "127.0.0.1"   # Loopback — server and client on the same machine
-SERVER_UDP_PORT = 5000           # Server's UDP data channel port (must match server.py)
-SERVER_SSL_PORT = 5001           # Server's SSL/TCP auth channel port (must match server.py)
+SERVER_HOST     = "127.0.0.1"    # Loopback — agar server isi laptop par chal raha ho
+SERVER_UDP_PORT = 5000           # Server ka UDP data channel port
+SERVER_SSL_PORT = 5001           # Server ka SSL/TCP auth channel port
 
-# Setup logger
+# Logger configure kar rahe hain taaki output achha dikhe
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger("Hybrid_Client")
 
@@ -64,57 +51,38 @@ class NotificationClient:
     def __init__(self, server_host=SERVER_HOST, server_udp_port=SERVER_UDP_PORT,
                  server_ssl_port=SERVER_SSL_PORT, loss_rate=0.0, verbose=True):
         """
-        Sets up both communication channels for the hybrid client.
-
-        Step 1: Create and bind a UDP socket to a random OS-assigned local port.
-                This UDP socket is the main data channel for the entire session.
-
-        Step 2: The UDP port is discovered via getsockname() and will be sent
-                to the server inside the SUBSCRIBE packet over SSL.
-
-        Step 3: Build an SSL context for the one-time auth channel.
-                (Actual SSL connection is made in subscribe() — not here.)
-
-        Args:
-            server_host:     IP address of the server.
-            server_udp_port: Port of the server's UDP data channel.
-            server_ssl_port: Port of the server's SSL/TCP auth channel.
-            loss_rate:       Fraction [0.0–1.0] to randomly drop packets (testing).
-            verbose:         If True, prints received notifications to the terminal.
+        Dono (UDP aur SSL) channels ka setup yahan hota hai.
         """
         self.server_host     = server_host
-        self.server_udp_addr = (server_host, server_udp_port)  # Where to send ACK/HEARTBEAT
-        self.server_ssl_addr = (server_host, server_ssl_port)  # Where to send SUBSCRIBE
+        self.server_udp_addr = (server_host, server_udp_port)  # Yahan hum ACK aur HEARTBEAT bhejenge
+        self.server_ssl_addr = (server_host, server_ssl_port)  # Yahan hum sirf SUBSCRIBE bhejenge
 
         # ─── UDP Socket (Main Data Channel) ──────────────────────────────────
-        # SOCK_DGRAM = UDP — connectionless, each datagram is independent
+        # SOCK_DGRAM ka matlab UDP hai (connectionless data)
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # Bind to "" (any local IP) and port 0 (OS assigns a free port).
-        # We need to bind explicitly so we have a stable port to give to the server.
+        # Port 0 bind karne se OS apne aap ek free local port de deta hai
         self.udp_socket.bind(("", 0))
 
-        # getsockname() returns the actual (IP, port) assigned by the OS.
-        # We store the port — this is sent to the server during SUBSCRIBE so it
-        # knows where to send UDP notifications for this client.
+        # getsockname() se humein pata chalta hai ki OS ne konsa port assign kiya
+        # Is port number ko hum server ko bhejenge taaki wo humein wapas data bhej sake
         self.udp_port = self.udp_socket.getsockname()[1]
         logger.info(f"UDP data channel bound to local port {self.udp_port}")
 
-        # ─── SSL Context (for one-shot auth channel) ──────────────────────────
-        # PROTOCOL_TLS_CLIENT: auto-negotiates TLS 1.2 or 1.3
+        # ─── SSL Context (Authentication Channel ke liye) ─────────────────────
+        # PROTOCOL_TLS_CLIENT TLS 1.2 ya 1.3 apne aap set kar lega
         self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
-        # For the self-signed development certificate, disable verification.
-        # In production: load_verify_locations("server.crt") + CERT_REQUIRED + check_hostname=True
+        # Development ke liye hum certificate verification band kar rahe hain
         self.ssl_context.check_hostname = False
-        self.ssl_context.verify_mode    = ssl.CERT_NONE  # Accept self-signed cert
+        self.ssl_context.verify_mode    = ssl.CERT_NONE  # Self-signed cert accept kar lega
 
-        # ─── Client State ─────────────────────────────────────────────────────
-        self.received_seqs = set()      # Seq numbers already processed (deduplication)
-        self.running       = True       # False = stop all background threads
-        self.loss_rate     = loss_rate  # Packet drop rate (testing only)
-        self.verbose       = verbose    # Whether to print notifications to terminal
-        self.latencies     = []         # End-to-end latency values (seconds) for metrics
+        # ─── Client Variables ──────────────────────────────────────────────────
+        self.received_seqs = set()      # Duplicate message rokne ke liye
+        self.running       = True       # Background threads ko control karne ke liye
+        self.loss_rate     = loss_rate  # Testing ke time packets drop(lose) karne ke liye
+        self.verbose       = verbose    # Notification terminal par dikhana hai ya nahi
+        self.latencies     = []         # Data aane mein kitna time laga (metrics ke liye)
 
     # ────────────────────────────────────────────────────────────────────────
     # SUBSCRIBE / UNSUBSCRIBE
@@ -122,231 +90,175 @@ class NotificationClient:
 
     def subscribe(self):
         """
-        Registers with the server by sending a SUBSCRIBE packet over SSL/TCP.
-
-        Process:
-          1. Create a new raw TCP socket and connect to the server's SSL auth port.
-          2. Wrap it with SSL — performs the TLS handshake (encrypts the session).
-          3. Send a SUBSCRIBE packet with OUR UDP port number as the payload.
-          4. Close the SSL connection — auth is done; UDP takes over from here.
-
-        Why send our UDP port?
-          The server receives this TCP connection from our TCP source port (random),
-          but it needs to know our UDP port (also random, but different) to send
-          notifications to us. The payload bridges this gap.
+        Server ko SUBSCRIBE packet bhejta hai taaki hum notifications receive kar sakein.
+        Yeh SSL/TCP ke through securely jata hai.
         """
         try:
-            # Step 1: Create fresh TCP socket for this auth connection
+            # Step 1: Naya raw TCP socket banao aur server ke SSL port pe connect karo
             raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             raw_sock.connect(self.server_ssl_addr)
 
         except ConnectionRefusedError:
-            # ─── Edge Case: Server Not Running ───────────────────────────────
-            logger.critical(f"Cannot connect to SSL auth server at {self.server_ssl_addr}. "
-                            "Is server.py running?")
+            # Agar server on nahi hai toh error dega
+            logger.critical(f"Cannot connect to SSL auth server at {self.server_ssl_addr}. Is server.py running?")
             return
 
         try:
-            # Step 2: Wrap TCP socket with SSL → TLS handshake happens here
+            # Step 2: TCP socket ko SSL se wrap karo (Encryption yahin shuru hota hai)
             ssl_sock = self.ssl_context.wrap_socket(raw_sock, server_hostname=self.server_host)
-            logger.info(f"SSL auth connected [{ssl_sock.version()}]. "
-                        f"Sending SUBSCRIBE (UDP port: {self.udp_port})...")
+            logger.info(f"SSL auth connected [{ssl_sock.version()}]. Sending SUBSCRIBE (UDP port: {self.udp_port})...")
 
-            # Step 3: Send SUBSCRIBE — payload is our UDP port as a string
-            # The server reads this and stores (our_ip, udp_port) as our address.
+            # Step 3: SUBSCRIBE packet encode karo. Payload mein apna UDP port bhej rahe hain
             packet = encode_packet(0, TYPE_SUBSCRIBE, str(self.udp_port))
             ssl_sock.sendall(packet)
 
-            # Step 4: Close the SSL connection — auth is complete
-            # From now on, all communication is over our UDP socket.
+            # Step 4: Subscribe hone ke baad connection band kar do. 
+            # Aage ka sara kaam UDP par hoga.
             ssl_sock.close()
             logger.info("SSL auth complete. Now receiving on UDP channel.")
 
         except ssl.SSLError as e:
-            # ─── Edge Case: SSL Handshake Failure ────────────────────────────
-            logger.critical(f"SSL handshake failed during subscribe: {e}. "
-                            "Ensure server.py is running with SSL enabled.")
+            logger.critical(f"SSL handshake failed: {e}")
             raw_sock.close()
-
         except Exception as e:
             logger.error(f"Subscribe failed: {e}")
 
     def unsubscribe(self):
         """
-        Sends an UNSUBSCRIBE packet over UDP to gracefully leave the group.
-
-        We use UDP (not a new SSL connection) for unsubscribe because:
-          - It's faster (no TLS handshake needed)
-          - The server's UDP listen_udp() thread already handles UNSUBSCRIBE
-          - The payload contains our UDP port so the server knows which subscriber to remove
+        Group se bahar aane ke liye UNSUBSCRIBE bhejte hain.
+        Yeh UDP ke through jata hai kyunki it is very fast.
         """
         logger.info("Sending UNSUBSCRIBE via UDP...")
-        # Include our UDP port in payload so server can identify which subscriber we are
+        # Server ko batate hain ki hamara port number yeh hai, hum jaa rahe hain
         packet = encode_packet(0, TYPE_UNSUBSCRIBE, str(self.udp_port))
         self.send_udp(packet)
 
     # ────────────────────────────────────────────────────────────────────────
-    # HEARTBEAT — KEEP-ALIVE
+    # HEARTBEAT — KEEP ALIVE
     # ────────────────────────────────────────────────────────────────────────
 
     def heartbeat_loop(self):
         """
-        Background thread: sends a tiny HEARTBEAT UDP datagram to the server every 2 seconds.
-
-        This is the client-side of the Keep-Alive mechanism:
-          - The server records when it last heard from each client.
-          - If a client goes silent for >5 seconds (~2.5 missed heartbeats),
-            the server evicts the client from its subscriber list.
-          - This automatically cleans up clients that crash or lose network
-            without ever sending UNSUBSCRIBE.
+        Server ko har 2 second mein yaad dilata hai ki main abhi bhi zinda/online hu.
         """
         while self.running:
             try:
+                # Sirf TYPE_HEARTBEAT packet bhej rahe hain bina kisi payload ke
                 packet = encode_packet(0, TYPE_HEARTBEAT, "")
-                self.send_udp(packet)   # Tiny UDP ping to the server's data channel
+                self.send_udp(packet)
             except Exception:
-                pass    # Don't crash the heartbeat thread — retry next iteration
-            time.sleep(2.0)     # Ping every 2 seconds
+                pass  # Ignore error aur next cycle mein try karo
+            time.sleep(2.0)  # Har 2 second mein ping karega
 
     # ────────────────────────────────────────────────────────────────────────
-    # UDP SENDING
+    # UDP SEND API
     # ────────────────────────────────────────────────────────────────────────
 
     def send_udp(self, packet):
         """
-        Sends a UDP datagram to the server's data channel (port 5000).
-
-        Uses sendto() with the server's UDP address (not send(), since UDP
-        is connectionless and we didn't call connect() on this socket).
-
-        Includes simulated packet loss for testing (loss_rate > 0 only in tests).
+        UDP socket directly server ke port 5000 par packet phek deta (send kar deta) hai.
         """
-        # Simulated packet drop for testing purposes
+        # Testing/Demonstration ke time randomly packet drop karne ka logic
         if random.random() < self.loss_rate:
-            logger.warning("Simulated DROP (client → server, UDP)")
+            logger.warning("Simulated DROP (client -> server, UDP)")
             return
 
         try:
+            # Sendto use karte hain kyunki UDP lagatar connected nahi rehta
             self.udp_socket.sendto(packet, self.server_udp_addr)
         except OSError as e:
-            # ─── Edge Case: UDP Send Failure ─────────────────────────────────
             logger.error(f"UDP send error: {e}")
 
     # ────────────────────────────────────────────────────────────────────────
-    # UDP LISTENING (RECEIVE NOTIFICATIONS)
+    # UDP LISTENING (DATA RECEIVER)
     # ────────────────────────────────────────────────────────────────────────
 
     def listen(self):
         """
-        Background thread: continuously listens for incoming UDP packets from the server.
-
-        Since UDP is connectionless, we use recvfrom() to receive datagrams.
-        We only process TYPE_NOTIFY packets — all other types are server-only.
-        Each NOTIFY is passed to handle_notification() for ACK + display.
+        Background process jo continuously wait karta hai naye UDP messages aane ka.
         """
         while self.running:
             try:
-                # Block until a UDP datagram arrives on our local port
-                # addr = (IP, port) of the sender; should be the server's UDP port
+                # recvfrom(4096) ruk ke wait karta hai data receive hone ka
                 data, addr = self.udp_socket.recvfrom(4096)
 
-                # Decode the binary packet using our custom protocol
+                # Decode the binary packet
                 seq_num, msg_type, payload, is_valid = decode_packet(data)
 
-                # ─── Corrupted Packet: discard ────────────────────────────────
+                # Agar packet network me raste mein corrupt ho gaya, toh reject kardo
                 if not is_valid:
                     logger.warning("Corrupted UDP packet received — discarding")
                     continue
 
-                # Only process notification messages
+                # Agar packet NOTIFY type ka hai toh handle karo
                 if msg_type == TYPE_NOTIFY:
                     self.handle_notification(seq_num, payload)
 
             except OSError as e:
-                # ─── Edge Case: UDP Socket Error ─────────────────────────────
                 if self.running:
                     logger.error(f"UDP receive error: {e}")
                 continue
             except Exception as e:
-                if self.running:
-                    logger.error(f"Unexpected error in listen loop: {e}")
                 continue
 
     # ────────────────────────────────────────────────────────────────────────
-    # NOTIFICATION HANDLER
+    # NOTIFICATION PROCESSOR
     # ────────────────────────────────────────────────────────────────────────
 
     def handle_notification(self, seq_num, message):
         """
-        Processes a received NOTIFY UDP packet. Four steps:
-
-        1. ACK immediately (via UDP) — Sends TYPE_ACK with the same seq_num back
-           to the server's UDP data channel, so the server stops its retransmission
-           timer for this packet. ACK sent BEFORE duplicate check so even duplicates
-           get ACK'd (stops unnecessary server retransmissions).
-
-        2. Duplicate check — UDP can deliver the same packet more than once (e.g.,
-           our ACK was lost so server retransmitted, but our first receive was fine).
-           We filter duplicates using the received_seqs set.
-
-        3. Latency extraction — The server prefixed the payload with its send timestamp:
-           "1712345678.123456|Hello World". We parse the timestamp, compute elapsed
-           time, and store the value for performance metrics analysis.
-
-        4. Display — Print the human-readable notification text to the terminal.
+        Jab koi naya message aata hai toh:
+        1. Usko ACK karte hain taaki server wapas same message na bheje.
+        2. Duplicate messages ko filter out karte hain.
+        3. Message ko terminal screen par print karte hain.
         """
-        # Step 1: ACK immediately so server stops retransmission timer for this seq
+        # Step 1: Server ko FORAN ACK bhejo warna block ho jaega/dobara retransmit karega
         logger.info(f"Received notification seq {seq_num}. Sending ACK via UDP...")
-        ack_packet = encode_packet(seq_num, TYPE_ACK, "")  # ACK carries seq_num back
-        self.send_udp(ack_packet)   # Sent to server's UDP data channel
+        ack_packet = encode_packet(seq_num, TYPE_ACK, "")
+        self.send_udp(ack_packet)
 
-        # Step 2: Duplicate check — have we already processed this seq_num?
+        # Step 2: Kya yeh message already aa chuka hai pichle send mein?
         if seq_num in self.received_seqs:
             logger.info(f"Duplicate seq {seq_num} — already processed, ignoring")
             return
 
-        # Mark as received so future duplicates of this seq are filtered out
+        # Add kar lo ki yeh sequence humne padh liya hai
         self.received_seqs.add(seq_num)
 
-        actual_message = message    # Will be updated once we strip the timestamp prefix
+        actual_message = message
 
-        # Step 3: Parse and extract the embedded timestamp from the payload
-        # Format: "1712345678.123456|<actual message text>"
+        # Step 3: Payload format aisa hota hai: "1712345678.12|ActualMessage"
+        # Yahan hum Timestamp nikaalte hain Latency napaane(calculate) ke liye
         if isinstance(message, str) and "|" in message:
-            parts = message.split("|", 1)   # Split only on the FIRST "|"
+            parts = message.split("|", 1)
             if len(parts) == 2:
                 try:
-                    sent_ts        = float(parts[0])         # Server's send timestamp
-                    latency        = time.time() - sent_ts   # Time elapsed = latency
-                    self.latencies.append(latency)           # Store for performance metrics
-                    actual_message = parts[1]                # Human-readable message text
+                    sent_ts        = float(parts[0])         # Server ne kab bheja tha
+                    latency        = time.time() - sent_ts   # Kitna time laga receive hone mein
+                    self.latencies.append(latency)
+                    actual_message = parts[1]                # Sirf real message bacha loge
                 except ValueError:
-                    pass    # If timestamp is malformed, show the raw payload
+                    pass
 
-        # Step 4: Print to terminal
+        # Step 4: Screen par print kar do
         if self.verbose:
             print(f"\n>>> NOTIFICATION [{seq_num}]: {actual_message}\n")
 
     # ────────────────────────────────────────────────────────────────────────
-    # ENTRY POINT
+    # MAIN PROGRAM
     # ────────────────────────────────────────────────────────────────────────
 
     def start(self):
         """
-        Entry point for running the client standalone (not in test mode).
-
-        1. Subscribes via SSL/TCP (one-shot auth with UDP port in payload).
-        2. Starts the UDP listener thread  — receives notifications, sends ACKs.
-        3. Starts the UDP heartbeat thread — keeps registration alive.
-        4. Waits for user to type 'quit' to cleanly unsubscribe and exit.
+        Client ko start karne ka function. Pehle subscribe karta hai, phir threads run karta hai.
         """
-        self.subscribe()    # SSL/TCP: one-shot SUBSCRIBE with our UDP port
+        self.subscribe()  # Pehle TCP se register karo
 
-        # Background thread: listens for NOTIFY on UDP, sends ACKs back via UDP
+        # Naya background worker start karo incoming UDP messages padhne ke liye
         listener_thread = threading.Thread(target=self.listen, daemon=True)
         listener_thread.start()
 
-        # Background thread: pings server via UDP every 2 seconds
+        # Ek aur worker start karo heartbeat ping karne ke liye
         heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
         heartbeat_thread.start()
 
@@ -357,19 +269,17 @@ class NotificationClient:
             while self.running:
                 msg = input()
                 if msg.lower() == 'quit':
-                    self.unsubscribe()      # UDP UNSUBSCRIBE → server removes us immediately
-                    self.running = False    # Stop both background threads
+                    self.unsubscribe()   # User quit type karega toh unsubscribe bhejenge
+                    self.running = False # Threads ko kill kar denge
         except KeyboardInterrupt:
-            self.unsubscribe()              # Ctrl+C → also unsubscribe cleanly
+            self.unsubscribe()
             self.running = False
 
 
-import sys
-
 if __name__ == "__main__":
-    # Allow passing the server IP via command line arguments!
-    # Usage: python3 client.py <server_ip>
-    # If no IP is provided, it defaults to SERVER_HOST (which is 127.0.0.1)
+    # Yahan sys.argv ka use hota hai command line argument padhne ke liye.
+    # Agar user ne command likhi: "python client.py 192.168.1.5"
+    # Toh yeh apne aap 192.168.1.5 accept kar lega.
     host = sys.argv[1] if len(sys.argv) > 1 else SERVER_HOST
     client = NotificationClient(server_host=host)
     client.start()
