@@ -364,7 +364,12 @@ class NotificationClient:
             self.running = False
 
 
+import sys
+
 if __name__ == "__main__":
-    # Runs when client.py is executed directly (not when imported by test_system.py)
-    client = NotificationClient()
+    # Allow passing the server IP via command line arguments!
+    # Usage: python3 client.py <server_ip>
+    # If no IP is provided, it defaults to SERVER_HOST (which is 127.0.0.1)
+    host = sys.argv[1] if len(sys.argv) > 1 else SERVER_HOST
+    client = NotificationClient(server_host=host)
     client.start()
