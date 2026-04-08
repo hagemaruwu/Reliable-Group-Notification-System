@@ -161,56 +161,53 @@ ls -lh server.crt server.key
 
 ---
 
-## 🚀 How to Run
+## 🚀 How to Showcase the Project (Viva Demo)
 
-### 1. Start the Reliable SSL Server
+You have two ways to present the project: **Localhost Demo** (easiest, most reliable) or **Cross-Device Demo** (requires a private Wi-Fi router).
 
-```bash
-python3 server.py
-```
+### Method A: The Localhost Demo (Recommended for Viva)
+*This method proves the entire Hybrid Architecture (TLS + UDP) works perfectly without fighting university firewalls or mobile hotspot AP isolation.*
 
-Expected output:
-```
-2024-xx-xx - [INFO] - SSL certificate loaded: server.crt
-2024-xx-xx - [INFO] - SSL Server listening on 0.0.0.0:5000
-SSL Server is active! Type any message to broadcast to all subscribers.
-```
+1. **Open Terminal 1 (The Server)**
+   ```bash
+   python3 server.py
+   ```
+2. **Open Terminal 2 (Client 1)**
+   ```bash
+   python3 client.py
+   ```
+3. **Open Terminal 3 (Client 2)**
+   ```bash
+   python3 client.py
+   ```
+4. **Test the Broadcast**
+   Go back to Terminal 1, type `Hello world!` and press Enter. You will instantly see the UDP broadcast hit both clients, and see the ACKs returned to the server.
 
-### 2. Connect Subscriber Clients
+---
 
-Open one or more new terminal windows and run:
+### Method B: Cross-Device Demo (Between Two Laptops)
+*Note: This will NOT work on an iPhone/Android Mobile Hotspot or University Wi-Fi due to "Client AP Isolation" hardware firewalls dropping peer-to-peer UDP packets. You MUST be connected to a normal Home Router.*
 
-```bash
-python3 client.py
-```
+1. **On Laptop 1 (The Mac/Server):**
+   Find your IP Address:
+   ```bash
+   ipconfig getifaddr en0
+   ```
+   *(Let's assume it prints `192.168.1.5`)*
 
-Expected output:
-```
-2024-xx-xx - [INFO] - SSL connection established with ('127.0.0.1', 5000) [Protocol: TLSv1.3]
-2024-xx-xx - [INFO] - Subscribing to server at ('127.0.0.1', 5000)...
-Connected! You will receive notifications here.
-Type 'quit' and press Enter to disconnect cleanly.
-```
+   Start the server:
+   ```bash
+   python3 server.py
+   ```
 
-### 3. Broadcast a Notification
+2. **On Laptop 2 (The Windows/Friend's PC):**
+   Ensure they have the latest code, then run the client by typing the Mac's IP address directly in the command:
+   ```cmd
+   python client.py 192.168.1.5
+   ```
 
-In the **server terminal**, type any message and press Enter:
-
-```
-Hello team! This is a test notification.
-```
-
-Clients will display:
-```
->>> NOTIFICATION [1]: Hello team! This is a test notification.
-```
-
-### 4. Graceful Client Disconnect
-
-In the **client terminal**, type:
-```
-quit
-```
+3. **Test the Broadcast:**
+   Type a message on the Mac server, and it will instantly pop up on the Windows laptop securely!
 
 ### 5. Run Automated Performance Tests
 
