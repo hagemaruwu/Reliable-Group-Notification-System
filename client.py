@@ -2,47 +2,49 @@
 client.py
 Author: Aditya Raj (PES2UG24CS033)
 Description:
-    Yeh Reliable Group Notification System ka subscriber client hai.
+    This file is the Subscriber Client of the Reliable Group Notification System.
+    Why does this file exist?
+    A client application needs to be incredibly lightweight so it takes up virtually
+    no CPU or memory running in the background. It is designed to be completely "stupid"
+    by design. It just connects to the server, listens quietly on a random port,
+    instantly screams "ACK" when data drops in, and displays the UI text. It relies 
+    entirely on server.py to do the heavy mathematical lifting.
 
-    ── Hybrid Architecture (SSL/TCP + UDP) ──────────────────────────────────────
-    Yeh client DO(2) channels use karta hai:
+    ── Hybrid Architecture Checkout ─────────────────────────────────────────────
+    The client interacts with TWO distinct networks:
 
-    1. SSL/TCP Authentication Channel (server port 5001 se connect hota hai)
-       ───────────────────────────────────────────────────────────────────
-       - Sirf ek baar shuru mein use hota hai SUBSCRIBE packet bhejne ke liye.
-       - SUBSCRIBE payload ke andar client ka apna UDP port number hota hai.
-       - Is connection mein TLS encryption hota hai (jo project ki requirement hai).
-       - SUBSCRIBE karne ke turant baad yeh connection close ho jata hai (one-shot auth).
+    1. SSL/TCP Authentication Channel (Server port 5001)
+       - Used solely to establish a highly secure TLS tunnel for the initial handshake.
+       - The client pushes its random UDP port through the tunnel.
+       - Hangs up the connection immediately to save server bandwidth (one-shot auth).
 
-    2. UDP Data Channel (client ek local UDP port bind karta hai, server 5000 use karta hai)
-       ───────────────────────────────────────────────────────────────────────────
-       - Server se aane wale saare NOTIFY packets yahan receive hote hain.
-       - Hum jo ACK (acknowledgement) bhejte hain wo yahan se jata hai.
-       - HEARTBEAT pings (har 2 second mein) yahan se bheji jati hain.
-       - Project purely "UDP-based" rahe, isliye baki saara data UDP par hai.
+    2. UDP Data Channel (Local random port -> Server port 5000)
+       - Sits idle waiting for massive NOTIFY broadcasts to fall from the sky.
+       - Blasts ACKs back upward through UDP.
+       - Blasts Heartbeat pings upward to prove it is still alive.
 """
 
-import socket     # Python ka built-in networking library
-import ssl        # SSL/TLS authentication ke liye (SUBSCRIBE packet encrypt karne)
-import threading  # Loops ko background mein ek sath (parallel) chalane ke liye
-import time       # Latency calculate karne aur heartbeat mein delay dene ke liye
-import logging    # Terminal par clear messages print karne ke liye
-import random     # Testing ke time packet drop (loss) simulate karne ke liye
-import sys        # Command line arguments read karne ke liye
+import socket     # Built-in network socket interface
+import ssl        # Cryptographic library to generate secure session keys
+import threading  # Allows parallel thread loops so the listener doesn't freeze the console
+import time       # Embedded calculation logic for subtracting transmission time (latency)
+import logging    # Professional formatted terminal output
+import random     # Simulates aggressive network failure in academic test scenarios
+import sys        # Allows us to capture arguments written in the terminal (like IP variables)
 
-# Hamara custom binary protocol format import kar rahe hain
+# Import our universal binary language dictionary and network tools
 from protocol import (
     TYPE_SUBSCRIBE, TYPE_NOTIFY, TYPE_ACK,
     TYPE_UNSUBSCRIBE, TYPE_HEARTBEAT,
     encode_packet, decode_packet
 )
 
-# ─── Default Server Addresses ─────────────────────────────────────────────────
-SERVER_HOST     = "127.0.0.1"    # Loopback — agar server isi laptop par chal raha ho
-SERVER_UDP_PORT = 5000           # Server ka UDP data channel port
-SERVER_SSL_PORT = 5001           # Server ka SSL/TCP auth channel port
+# ─── Default Server Endpoints ────────────────────────────────────────────────
+SERVER_HOST     = "127.0.0.1"    # Loopback IP (used if no CLI argument is provided)
+SERVER_UDP_PORT = 5000           # The server's UDP target (Must perfectly match server.py)
+SERVER_SSL_PORT = 5001           # The server's VIP TCP target (Must perfectly match server.py)
 
-# Logger configure kar rahe hain taaki output achha dikhe
+# Standard logging formatter
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger("Hybrid_Client")
 
@@ -51,69 +53,71 @@ class NotificationClient:
     def __init__(self, server_host=SERVER_HOST, server_udp_port=SERVER_UDP_PORT,
                  server_ssl_port=SERVER_SSL_PORT, loss_rate=0.0, verbose=True):
         """
-        Dono (UDP aur SSL) channels ka setup yahan hota hai.
+        Architects both the UDP postbox and the SSL keys upon software startup.
         """
         self.server_host     = server_host
-        self.server_udp_addr = (server_host, server_udp_port)  # Yahan hum ACK aur HEARTBEAT bhejenge
-        self.server_ssl_addr = (server_host, server_ssl_port)  # Yahan hum sirf SUBSCRIBE bhejenge
+        self.server_udp_addr = (server_host, server_udp_port)  # Target for ACK and HEARTBEAT
+        self.server_ssl_addr = (server_host, server_ssl_port)  # Target for one-off SUBSCRIBE
 
-        # ─── UDP Socket (Main Data Channel) ──────────────────────────────────
-        # SOCK_DGRAM ka matlab UDP hai (connectionless data)
+        # ─── 1. Build Local UDP Socket ───────────────────────────────────────
+        # AF_INET = IPv4 Internet. SOCK_DGRAM = Connectionless UDP Datagram.
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # Port 0 bind karne se OS apne aap ek free local port de deta hai
+        # Brilliant Hack: By binding to Port '0', we force the Operating System
+        # to randomly assign us any perfectly free port. We do this so multiple
+        # clients running on the same laptop don't accidentally try to use the same port!
         self.udp_socket.bind(("", 0))
 
-        # getsockname() se humein pata chalta hai ki OS ne konsa port assign kiya
-        # Is port number ko hum server ko bhejenge taaki wo humein wapas data bhej sake
+        # Ask the OS: "What port number did you just give me?"
+        # We save this number so we can securely message it to the server!
         self.udp_port = self.udp_socket.getsockname()[1]
         logger.info(f"UDP data channel bound to local port {self.udp_port}")
 
-        # ─── SSL Context (Authentication Channel ke liye) ─────────────────────
-        # PROTOCOL_TLS_CLIENT TLS 1.2 ya 1.3 apne aap set kar lega
+        # ─── 2. Build SSL Context ────────────────────────────────────────────
+        # Prepare to act as a client negotiating a TLS handshake
         self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
-        # Development ke liye hum certificate verification band kar rahe hain
+        # Because we are using a self-made, unpaid server certificate (not via Google Auth), 
+        # the OS will inherently block the connection. We explicitly bypass hostname checks
+        # to force Python to trust the custom certificate we made.
         self.ssl_context.check_hostname = False
-        self.ssl_context.verify_mode    = ssl.CERT_NONE  # Self-signed cert accept kar lega
+        self.ssl_context.verify_mode    = ssl.CERT_NONE  
 
-        # ─── Client Variables ──────────────────────────────────────────────────
-        self.received_seqs = set()      # Duplicate message rokne ke liye
-        self.running       = True       # Background threads ko control karne ke liye
-        self.loss_rate     = loss_rate  # Testing ke time packets drop(lose) karne ke liye
-        self.verbose       = verbose    # Notification terminal par dikhana hai ya nahi
-        self.latencies     = []         # Data aane mein kitna time laga (metrics ke liye)
+        # ─── Client Memory ───────────────────────────────────────────────────
+        self.received_seqs = set()      # Safety log to prevent duplicate messages
+        self.running       = True       # Master kill switch for all threads
+        self.loss_rate     = loss_rate  # Artificially drops packets
+        self.verbose       = verbose    # Flag to hide text output during massive tests
+        self.latencies     = []         # Array to store all mathematical latency times
 
     # ────────────────────────────────────────────────────────────────────────
-    # SUBSCRIBE / UNSUBSCRIBE
+    # AUTHENTICATION HOOKS
     # ────────────────────────────────────────────────────────────────────────
 
     def subscribe(self):
         """
-        Server ko SUBSCRIBE packet bhejta hai taaki hum notifications receive kar sakein.
-        Yeh SSL/TCP ke through securely jata hai.
+        Initiates the secure handshake sequence.
+        Transmits our UDP port number deeply encrypted to bypass Wi-Fi snoopers.
         """
         try:
-            # Step 1: Naya raw TCP socket banao aur server ke SSL port pe connect karo
+            # Step 1: Establish physical TCP bridge to the server.
             raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             raw_sock.connect(self.server_ssl_addr)
 
         except ConnectionRefusedError:
-            # Agar server on nahi hai toh error dega
             logger.critical(f"Cannot connect to SSL auth server at {self.server_ssl_addr}. Is server.py running?")
             return
 
         try:
-            # Step 2: TCP socket ko SSL se wrap karo (Encryption yahin shuru hota hai)
+            # Step 2: Push the raw bridge through our SSL cryptographic machine
             ssl_sock = self.ssl_context.wrap_socket(raw_sock, server_hostname=self.server_host)
             logger.info(f"SSL auth connected [{ssl_sock.version()}]. Sending SUBSCRIBE (UDP port: {self.udp_port})...")
 
-            # Step 3: SUBSCRIBE packet encode karo. Payload mein apna UDP port bhej rahe hain
+            # Step 3: Embed our randomly generated UDP port into the payload string
             packet = encode_packet(0, TYPE_SUBSCRIBE, str(self.udp_port))
             ssl_sock.sendall(packet)
 
-            # Step 4: Subscribe hone ke baad connection band kar do. 
-            # Aage ka sara kaam UDP par hoga.
+            # Step 4: Drop the bridge. The server will now communicate solely via UDP.
             ssl_sock.close()
             logger.info("SSL auth complete. Now receiving on UDP channel.")
 
@@ -125,72 +129,71 @@ class NotificationClient:
 
     def unsubscribe(self):
         """
-        Group se bahar aane ke liye UNSUBSCRIBE bhejte hain.
-        Yeh UDP ke through jata hai kyunki it is very fast.
+        Respectfully request eviction via the fast UDP channel.
         """
         logger.info("Sending UNSUBSCRIBE via UDP...")
-        # Server ko batate hain ki hamara port number yeh hai, hum jaa rahe hain
         packet = encode_packet(0, TYPE_UNSUBSCRIBE, str(self.udp_port))
         self.send_udp(packet)
 
     # ────────────────────────────────────────────────────────────────────────
-    # HEARTBEAT — KEEP ALIVE
+    # THREAD 1: BACKGROUND PINGER
     # ────────────────────────────────────────────────────────────────────────
 
     def heartbeat_loop(self):
         """
-        Server ko har 2 second mein yaad dilata hai ki main abhi bhi zinda/online hu.
+        The invisible ninja thread.
+        Awakens every 2 seconds, generates an empty Type 5 payload, fires it at 
+        the server, and goes back to sleep. Stops the server from auto-evicting us.
         """
         while self.running:
             try:
-                # Sirf TYPE_HEARTBEAT packet bhej rahe hain bina kisi payload ke
                 packet = encode_packet(0, TYPE_HEARTBEAT, "")
                 self.send_udp(packet)
             except Exception:
-                pass  # Ignore error aur next cycle mein try karo
-            time.sleep(2.0)  # Har 2 second mein ping karega
+                pass  # Do not crash the thread if the Wi-Fi card hangs
+            time.sleep(2.0)  
 
     # ────────────────────────────────────────────────────────────────────────
-    # UDP SEND API
+    # OUTBOUND UDP FIRING MECHANISM
     # ────────────────────────────────────────────────────────────────────────
 
     def send_udp(self, packet):
         """
-        UDP socket directly server ke port 5000 par packet phek deta (send kar deta) hai.
+        Takes raw binary packets and shoots them out of our Datagram socket
+        directly up into the Server UDP Address.
         """
-        # Testing/Demonstration ke time randomly packet drop karne ka logic
+        # Academic testing logic: If we roll the dice below the drop percent, delete packet!
         if random.random() < self.loss_rate:
             logger.warning("Simulated DROP (client -> server, UDP)")
             return
 
         try:
-            # Sendto use karte hain kyunki UDP lagatar connected nahi rehta
+            # sendto() does not require a prior connection state
             self.udp_socket.sendto(packet, self.server_udp_addr)
         except OSError as e:
             logger.error(f"UDP send error: {e}")
 
     # ────────────────────────────────────────────────────────────────────────
-    # UDP LISTENING (DATA RECEIVER)
+    # THREAD 2: UDP LISTENER
     # ────────────────────────────────────────────────────────────────────────
 
     def listen(self):
         """
-        Background process jo continuously wait karta hai naye UDP messages aane ka.
+        Background infinite loop — waits silently for massive server blasts.
         """
         while self.running:
             try:
-                # recvfrom(4096) ruk ke wait karta hai data receive hone ka
+                # Execution halts here until data drops down from the cloud
                 data, addr = self.udp_socket.recvfrom(4096)
-
-                # Decode the binary packet
+                
+                # Slices the sequence, type, payload, and physically verifies mathematical CRC32 checksums
                 seq_num, msg_type, payload, is_valid = decode_packet(data)
 
-                # Agar packet network me raste mein corrupt ho gaya, toh reject kardo
+                # Packet was garbled slightly by physical internet static interference. Reject.
                 if not is_valid:
                     logger.warning("Corrupted UDP packet received — discarding")
                     continue
 
-                # Agar packet NOTIFY type ka hai toh handle karo
                 if msg_type == TYPE_NOTIFY:
                     self.handle_notification(seq_num, payload)
 
@@ -202,63 +205,70 @@ class NotificationClient:
                 continue
 
     # ────────────────────────────────────────────────────────────────────────
-    # NOTIFICATION PROCESSOR
+    # NOTIFICATION PARSER & LOGIC ENGINE
     # ────────────────────────────────────────────────────────────────────────
 
     def handle_notification(self, seq_num, message):
         """
-        Jab koi naya message aata hai toh:
-        1. Usko ACK karte hain taaki server wapas same message na bheje.
-        2. Duplicate messages ko filter out karte hain.
-        3. Message ko terminal screen par print karte hain.
+        The absolute fastest execution block in the codebase.
+        1. Explodes an ACK backward.
+        2. Blocks duplicated retransmissions.
+        3. Isolates network latency math.
+        4. Renders output text physically to the screen display.
         """
-        # Step 1: Server ko FORAN ACK bhejo warna block ho jaega/dobara retransmit karega
+        
+        # Step 1: EXTREMELY CRITICAL ORDER OF OPERATIONS!
+        # Before we even read the message text, we MUST fire a Type 3 ACK backward. 
+        # We must respond instantly to stop the far-away Server from triggering its panic queue timer!
         logger.info(f"Received notification seq {seq_num}. Sending ACK via UDP...")
         ack_packet = encode_packet(seq_num, TYPE_ACK, "")
         self.send_udp(ack_packet)
 
-        # Step 2: Kya yeh message already aa chuka hai pichle send mein?
+        # Step 2: The Duplicate Blocker
+        # If we received Message #5 but our ACK was jammed in network traffic, the Server
+        # will violently shoot Message #5 at us again. If we already saw the sequence ID, 
+        # we completely ignore it.
         if seq_num in self.received_seqs:
             logger.info(f"Duplicate seq {seq_num} — already processed, ignoring")
             return
 
-        # Add kar lo ki yeh sequence humne padh liya hai
         self.received_seqs.add(seq_num)
 
         actual_message = message
 
-        # Step 3: Payload format aisa hota hai: "1712345678.12|ActualMessage"
-        # Yahan hum Timestamp nikaalte hain Latency napaane(calculate) ke liye
+        # Step 3: Latency Calculator
+        # The sever prefixes all blasts with clock math (`1712345678.12|Hello`)
+        # We split the string structure by its delimiter ('|')
+        # We take the server's origination timestamp, and subtract it against our own hardware clock!
         if isinstance(message, str) and "|" in message:
             parts = message.split("|", 1)
             if len(parts) == 2:
                 try:
-                    sent_ts        = float(parts[0])         # Server ne kab bheja tha
-                    latency        = time.time() - sent_ts   # Kitna time laga receive hone mein
+                    sent_ts        = float(parts[0])         
+                    latency        = time.time() - sent_ts   # Measure elapsed air travel time
                     self.latencies.append(latency)
-                    actual_message = parts[1]                # Sirf real message bacha loge
+                    actual_message = parts[1]                # Snip cleanly to preserve UX Message Integrity
                 except ValueError:
                     pass
 
-        # Step 4: Screen par print kar do
+        # Step 4: Render UX text block
         if self.verbose:
             print(f"\n>>> NOTIFICATION [{seq_num}]: {actual_message}\n")
 
     # ────────────────────────────────────────────────────────────────────────
-    # MAIN PROGRAM
+    # MAIN PROGRAM EXECUTION
     # ────────────────────────────────────────────────────────────────────────
 
     def start(self):
         """
-        Client ko start karne ka function. Pehle subscribe karta hai, phir threads run karta hai.
+        Fires execution sequence: Subscribe -> Start Listaner -> Start Heartbeat
         """
-        self.subscribe()  # Pehle TCP se register karo
+        self.subscribe()  
 
-        # Naya background worker start karo incoming UDP messages padhne ke liye
+        # Daemon threads mean they will automatically terminate if the primary script closes
         listener_thread = threading.Thread(target=self.listen, daemon=True)
         listener_thread.start()
 
-        # Ek aur worker start karo heartbeat ping karne ke liye
         heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
         heartbeat_thread.start()
 
@@ -269,17 +279,17 @@ class NotificationClient:
             while self.running:
                 msg = input()
                 if msg.lower() == 'quit':
-                    self.unsubscribe()   # User quit type karega toh unsubscribe bhejenge
-                    self.running = False # Threads ko kill kar denge
+                    self.unsubscribe()   
+                    self.running = False 
         except KeyboardInterrupt:
             self.unsubscribe()
             self.running = False
 
 
 if __name__ == "__main__":
-    # Yahan sys.argv ka use hota hai command line argument padhne ke liye.
-    # Agar user ne command likhi: "python client.py 192.168.1.5"
-    # Toh yeh apne aap 192.168.1.5 accept kar lega.
+    # Command Line Interface (CLI) IP target logic.
+    # Enables dynamic friend testing like: "python client.py 192.168.1.5"
+    # If no argument is passed, it intelligently defaults to localhost (127.0.0.1)
     host = sys.argv[1] if len(sys.argv) > 1 else SERVER_HOST
     client = NotificationClient(server_host=host)
     client.start()
