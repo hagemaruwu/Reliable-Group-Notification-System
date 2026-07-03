@@ -37,7 +37,7 @@ using low-level socket programming. The system demonstrates:
                       │                                              │
     Port 5001         │  ┌────────────────────────────────────────┐  │
   ┌─SSL/TCP Auth──────┤  │  accept_ssl_clients() thread           │  │
-  │  (SUBSCRIBE only) │  │  → TLS 1.3 handshake (server.crt/.key)│  │
+  │  (SUBSCRIBE only) │  │  → TLS 1.3 handshake (server.crt/.key) │  │
   │                   │  │  → Reads SUBSCRIBE + client's UDP port │  │
   │                   │  │  → Registers (IP, udp_port) in set     │  │
   │                   │  │  → Closes SSL connection (one-shot)    │  │
@@ -62,7 +62,7 @@ using low-level socket programming. The system demonstrates:
                │    CLIENT A          │    │    CLIENT B          │
                │  (client.py)         │    │  (client.py)         │
                │                      │    │                      │
-               │ 1. subscribe():       │    │ 1. subscribe():      │
+               │ 1. subscribe():      │    │ 1. subscribe():      │
                │    SSL/TCP to :5001  │    │    SSL/TCP to :5001  │
                │    sends UDP port    │    │    sends UDP port    │
                │    → closes SSL      │    │    → closes SSL      │
@@ -91,9 +91,9 @@ the same 9-byte binary header format defined in `protocol.py`:
 ```
  0       4   5     7     9         9 + payload_len
  ┌───────────┬──┬──────┬──────┬────────────────────┐
- │ Seq Num   │Ty│ Len  │ CRC  │     Payload         │
- │ (4 bytes) │pe│(2 B) │(2 B) │  (variable length)  │
- │ uint32    │(1│uint16│uint16│  UTF-8 string        │
+ │ Seq Num   │Ty│ Len  │ CRC  │     Payload        │
+ │ (4 bytes) │pe│(2 B) │(2 B) │  (variable length) │
+ │ uint32    │(1│uint16│uint16│  UTF-8 string      │
  └───────────┴──┴──────┴──────┴────────────────────┘
 ```
 
@@ -161,11 +161,9 @@ ls -lh server.crt server.key
 
 ---
 
-## 🚀 How to Showcase the Project (Viva Demo)
+## 🚀 The Project Demo
 
-You have two ways to present the project: **Localhost Demo** (easiest, most reliable) or **Cross-Device Demo** (requires a private Wi-Fi router).
-
-### Method A: The Localhost Demo (Recommended for Viva)
+### Method A: The Localhost Demo
 *This method proves the entire Hybrid Architecture (TLS + UDP) works perfectly without fighting university firewalls or mobile hotspot AP isolation.*
 
 1. **Open Terminal 1 (The Server)**
